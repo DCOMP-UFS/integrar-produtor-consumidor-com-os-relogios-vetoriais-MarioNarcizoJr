@@ -9,11 +9,6 @@
 // * Compilação: mpicc -o parte3 parte3.c  -lpthread -lrt
 // * Execução:   mpiexec -n 3 ./parte3 
 // wsl: mpiexec --host $(hostnamectl hostname):3 -n 3 parte3
-/*
-
-- tirar codigos duplicados do processo
-- funcções separadas de inserir e retirar da fila
-*/
 
 #define SIZE 10 //tamanho das filas
 
