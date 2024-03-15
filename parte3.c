@@ -1,335 +1,275 @@
-/* File:
+/*
  * Compile:  mpicc -g -Wall -o parte3 parte3.c -lpthread -lrt
  * Usage:    mpiexec -n 3 ./parte3
- */
+ */ 
 
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include <string.h>
+#include <pthread.h> 
 #include <unistd.h>
 #include <semaphore.h>
 #include <time.h>
-#include <mpi.h>
+#include <mpi.h>     
 
-#define BUFFER_SIZE 6 // Númermo máximo de tarefas enfileiradas
+#define NTHREADS 3
+#define FILA_SIZE 10
 
-typedef struct Relogio
-{
+typedef struct {
     int p[3];
+    int idProcess;
 } Relogio;
 
-typedef struct msg
-{
-    int origem;
-    int destino;
-    Relogio relogio;
-} Msg;
+pthread_mutex_t saidaMUTEX;
+pthread_cond_t saidaVAZIA;
+pthread_cond_t saidaCHEIO;
 
-Relogio qEntrada[BUFFER_SIZE];
-Msg qSaida[BUFFER_SIZE];
+int saidacontRelogio = 0;
+Relogio saidaClockCont[FILA_SIZE];
 
-Relogio relogioGlobal = {{0, 0, 0}};
+pthread_mutex_t entradaMUTEX;
+pthread_cond_t entradaVAZIA;
+pthread_cond_t entradaCHEIO;
+int entradacontRelogio = 0;
+Relogio entradafilaRelogio[FILA_SIZE];
 
-int qEntradaCount = 0;
-int qSaidaCount = 0;
-
-pthread_mutex_t mutexEntrada;
-pthread_mutex_t mutexSaida;
-
-pthread_cond_t condCheioEntrada;
-pthread_cond_t condVazioEntrada;
-
-pthread_cond_t condCheioSaida;
-pthread_cond_t condVazioSaida;
-
-void printarRelogio(Relogio *relogio, int pid, int action)
-{
-    switch (action)
-    {
-    case 1:
-        printf("Processo: %d | Relogio: (%d, %d, %d)\n", pid, relogio->p[0], relogio->p[1], relogio->p[2]);
-        break;
-    case 2:
-        printf("Processo: %d | Relogio: (%d, %d, %d)\n", pid, relogio->p[0], relogio->p[1], relogio->p[2]);
-        break;
-    case 3:
-        printf("Processo: %d | Relogio: (%d, %d, %d)\n", pid, relogio->p[0], relogio->p[1], relogio->p[2]);
-        break;
-    default:
-        break;
-    }
-}
-
-void Event(int pid, Relogio *relogio)
-{
+void Event(int pid, Relogio *relogio) {
     relogio->p[pid]++;
-    printarRelogio(&relogioGlobal, pid, 1);
+    printf("Processo: %d, Relógio: (%d, %d, %d)\n", pid, relogio->p[0], relogio->p[1], relogio->p[2]);
 }
 
-void Send(int origem, int destino)
-{
-    pthread_mutex_lock(&mutexSaida);
-    relogioGlobal.p[origem]++;
-    printarRelogio(&relogioGlobal, origem, 2);
-    while (qSaidaCount == BUFFER_SIZE)
-    {
-        pthread_cond_wait(&condCheioSaida, &mutexSaida);
+Relogio GetClock(pthread_mutex_t *mutex, pthread_cond_t *condVAZIO, pthread_cond_t *condCHEIO, int *contRelogio, Relogio *filaRelogio) {
+    Relogio relogio;
+    pthread_mutex_lock(mutex);
+    
+    while (*contRelogio == 0) {
+        pthread_cond_wait(condVAZIO, mutex);
     }
 
-    Msg *msg = (Msg *)malloc(sizeof(Msg));
-    msg->relogio = relogioGlobal;
-    msg->origem = origem;
-    msg->destino = destino;
+    relogio = filaRelogio[0];
 
-    qSaida[qSaidaCount] = *msg;
-    qSaidaCount++;
+    for (int i = 0; i < *contRelogio - 1; i++) {
+        filaRelogio[i] = filaRelogio[i + 1];
+    }
 
-    pthread_mutex_unlock(&mutexSaida);
-    pthread_cond_signal(&condVazioSaida);
+    (*contRelogio)--;
+    
+    pthread_mutex_unlock(mutex);
+
+    pthread_cond_signal(condCHEIO);
+    
+    return relogio;
 }
 
-void Receive(int pid)
-{
-    pthread_mutex_lock(&mutexEntrada);
-    relogioGlobal.p[pid]++;
-    while (qEntradaCount == 0)
-    {
-        pthread_cond_wait(&condVazioEntrada, &mutexEntrada);
+void PutClock(pthread_mutex_t *mutex, pthread_cond_t *condVAZIO, pthread_cond_t *condCHEIO, int *contRelogio, Relogio relogio, Relogio *filaRelogio) {
+    pthread_mutex_lock(mutex);
+
+    while (*contRelogio == FILA_SIZE) {
+        pthread_cond_wait(condCHEIO, mutex);
     }
+    
+    Relogio temp = relogio;
 
-    Relogio relogio = qEntrada[0];
+    filaRelogio[*contRelogio] = temp;
+    (*contRelogio)++;
+    
 
-    for (int i = 0; i < qEntradaCount; i++)
-    {
-        qEntrada[i] = qEntrada[i + 1];
-    }
-    qEntradaCount--;
+    pthread_mutex_unlock(mutex);
+    pthread_cond_signal(condVAZIO);
+}
 
-    for (int i = 0; i < 3; i++)
-    {
-        if (relogio.p[i] > relogioGlobal.p[i])
-        {
-            relogioGlobal.p[i] = relogio.p[i];
+void SendControl(int id, Relogio *relogio) {
+    Event(id, relogio);
+    PutClock(&saidaMUTEX, &saidaVAZIA, &saidaCHEIO, &saidacontRelogio, *relogio, saidaClockCont);
+}
+
+Relogio* ReceiveControl(int id, Relogio *relogio) {
+    Relogio* temp = relogio;
+    Relogio relogio2 = GetClock(&entradaMUTEX, &entradaVAZIA, &entradaCHEIO, &entradacontRelogio, entradafilaRelogio);
+    for (int i = 0; i < 3; i++) {
+        if (temp->p[i] < relogio2.p[i]) {
+            temp->p[i] = relogio2.p[i];
         }
     }
-
-    printarRelogio(&relogioGlobal, pid, 3);
-    pthread_mutex_unlock(&mutexEntrada);
-    pthread_cond_signal(&condCheioEntrada);
+    temp->p[id]++;
+    printf("Processo: %d, Relógio: (%d, %d, %d)\n", id, relogio->p[0], relogio->p[1], relogio->p[2]);
+    return temp;
 }
 
-void submitSaida()
-{
-    pthread_mutex_lock(&mutexSaida);
-
-    while (qSaidaCount == 0)
-    {
-        pthread_cond_wait(&condVazioSaida, &mutexSaida);
-    }
-
-    int *resultados;
-    resultados = calloc(3, sizeof(int));
-
-    Msg resposta = qSaida[0];
-    for (int i = 0; i < qSaidaCount - 1; i++)
-    {
-        qSaida[i] = qSaida[i + 1];
-    }
-    qSaidaCount--;
-
-    for (int i = 0; i < 3; i++)
-    {
-        resultados[i] = resposta.relogio.p[i];
-    }
-
-    MPI_Send(resultados, 3, MPI_INT, resposta.destino, resposta.origem, MPI_COMM_WORLD);
-
-    pthread_mutex_unlock(&mutexSaida);
-    pthread_cond_signal(&condCheioSaida);
+void Send(int pid, Relogio *relogio){
+    int mensagem[3];
+    mensagem[0] = relogio->p[0];
+    mensagem[1] = relogio->p[1];
+    mensagem[2] = relogio->p[2];
+    //MPI SEND
+    MPI_Send(&mensagem, 3, MPI_INT, relogio->idProcess, 0, MPI_COMM_WORLD);
 }
 
-void getEntrada(long myPid)
-{
-    int *resultados;
-    resultados = calloc(3, sizeof(int));
-    Relogio *relogio = (Relogio *)malloc(sizeof(Relogio));
-    MPI_Recv(resultados, 3, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-    for (int i = 0; i < 3; i++)
-    {
-        relogio->p[i] = resultados[i];
-    }
-
-    free(resultados);
-
-    pthread_mutex_lock(&mutexEntrada);
-
-    while (qEntradaCount == BUFFER_SIZE)
-    {
-        pthread_cond_wait(&condCheioEntrada, &mutexEntrada);
-    }
-
-    qEntrada[qEntradaCount] = *relogio;
-    qEntradaCount++;
-
-    pthread_mutex_unlock(&mutexEntrada);
-    pthread_cond_signal(&condVazioEntrada);
+void Receive(int pid, Relogio *relogio){
+    int mensagem[3];
+    //MPI RECV
+    MPI_Recv(&mensagem, 3, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    relogio->p[0] = mensagem[0];
+    relogio->p[1] = mensagem[1];
+    relogio->p[2] = mensagem[2];
 }
 
-void *startThreadEntrada(void *args)
-{
-    long myPid = (long)args;
-    int cont = 0;
-    switch (myPid)
-    {
-    case 0:
-        cont = 2;
-        break;
-    case 1:
-        cont = 2;
-        break;
-    case 2:
-        cont = 1;
-        break;
+void *MainThread(void *args) {
+    long id = (long) args;
+    int pid = (int) id;
+    Relogio* relogio = malloc(sizeof(Relogio));
+    
+    // Inicializando os campos da estrutura Relogio
+    relogio->p[0] = 0;
+    relogio->p[1] = 0;
+    relogio->p[2] = 0;
+    relogio->idProcess = 0;
+        
+    if (pid == 0) {
+        
+        Event(pid, relogio);
+        
+      
+        relogio->idProcess = 1;
+        SendControl(pid, relogio);
+       
+        relogio = ReceiveControl(pid, relogio);
+        
+      
+        relogio->idProcess = 2;
+        SendControl(pid, relogio);
+       
+        relogio = ReceiveControl(pid, relogio);
+        
+        
+        relogio->idProcess = 1;
+        SendControl(pid, relogio);
+    
+       
+        Event(pid, relogio);
+    } else if (pid == 1) {
+        
+        relogio->idProcess = 0;
+        SendControl(pid, relogio);
+        
+     
+        relogio = ReceiveControl(pid, relogio);
+        
 
-    default:
-        break;
-    }
-    int i = 0;
-    for (i; i < cont; i++){
-        getEntrada(myPid);
-    }
-    return NULL;
-}
-
-void *startThreadMeio(void *args)
-{
-    long p = (long)args;
-
-    if (p == 0)
-    {
-        Event(0, &relogioGlobal);
-        Send(0, 1);
-        Receive(0);
-        Send(0, 2);
-        Receive(0);
-        Send(0, 1);
-        Event(0, &relogioGlobal);
-    }
-
-    if (p == 1)
-    {
-        Send(1, 0);
-        Receive(1);
-        Receive(1);
-    }
-
-    if (p == 2)
-    {
-        Event(2, &relogioGlobal);
-        Send(2, 0);
-        Receive(2);
-    }
-    return NULL;
-}
-
-void *startThreadSaida(void *args)
-{
-    long myPid = (long)args;
-
-    int cont = 0;
-
-    switch (myPid)
-    {
-    case 0:
-        cont = 3;
-        break;
-    case 1:
-        cont = 1;
-        break;
-    case 2:
-        cont = 1;
-        break;
-
-    default:
-        break;
-    }
-    int i = 0;
-    for (i; i < cont; i++){
-        submitSaida();
+        relogio = ReceiveControl(pid, relogio);
+    } else if (pid == 2) {
+    
+        Event(pid, relogio);
+        
+    
+        relogio->idProcess = 0;
+        SendControl(pid, relogio);
+     
+        relogio = ReceiveControl(pid, relogio);
     }
 
     return NULL;
 }
 
-void createThreads(long n)
-{
-    pthread_t tEntrada;
-    pthread_t tMeio;
-    pthread_t tSaida;
-
-    pthread_cond_init(&condVazioEntrada, NULL);
-    pthread_cond_init(&condVazioSaida, NULL);
-    pthread_cond_init(&condCheioSaida, NULL);
-    pthread_cond_init(&condCheioEntrada, NULL);
-    pthread_mutex_init(&mutexEntrada, NULL);
-    pthread_mutex_init(&mutexSaida, NULL);
-
-    if (pthread_create(&tMeio, NULL, &startThreadMeio, (void *)n) != 0)
-    {
-        perror("Falha ao criar a thread");
+void *SendThread(void *args) {
+    long pid = (long) args;
+    Relogio relogio;
+    
+    while(1){
+      relogio = GetClock(&saidaMUTEX, &saidaVAZIA, &saidaCHEIO, &saidacontRelogio, saidaClockCont);
+      Send(pid, &relogio);
     }
 
-    if (pthread_create(&tEntrada, NULL, &startThreadEntrada, (void *)n) != 0)
-    {
-        perror("Falha ao criar a thread");
-    }
-
-    if (pthread_create(&tSaida, NULL, &startThreadSaida, (void *)n) != 0)
-    {
-        perror("Falha ao criar a thread");
-    }
-
-    if (pthread_join(tMeio, NULL) != 0)
-    {
-        perror("Falha ao dar join na thread");
-    }
-
-    if (pthread_join(tEntrada, NULL) != 0)
-    {
-        perror("Falha ao dar join na thread");
-    }
-
-    if (pthread_join(tSaida, NULL) != 0)
-    {
-        perror("Falha ao dar join na thread");
-    }
-
-    pthread_cond_destroy(&condVazioEntrada);
-    pthread_cond_destroy(&condVazioSaida);
-    pthread_cond_destroy(&condCheioSaida);
-    pthread_cond_destroy(&condCheioEntrada);
-    pthread_mutex_destroy(&mutexEntrada);
-    pthread_mutex_destroy(&mutexSaida);
+    return NULL;
 }
 
-int main(int argc, char *argv[])
-{
-    int my_rank;
+void *ReceiveThread(void *args) {
+    long pid = (long) args;
+    Relogio relogio;
 
-    MPI_Init(NULL, NULL);
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-
-    if (my_rank == 0)
-        createThreads(0);
-
-    else if (my_rank == 1)
-        createThreads(1);
-
-    else if (my_rank == 2)
-        createThreads(2);
-
-    MPI_Finalize();
-    return 0;
+    while(1){
+      Receive(pid, &relogio);
+      PutClock(&entradaMUTEX, &entradaVAZIA, &entradaCHEIO, &entradacontRelogio, relogio, entradafilaRelogio);
+    }
+ 
+    return NULL;
 }
+
+// Representa o processo de rank 0
+void process0(){
+   pthread_t thread[NTHREADS];
+   pthread_create(&thread[0], NULL, &MainThread, (void*) 0);
+   pthread_create(&thread[1], NULL, &SendThread, (void*) 0);
+   pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 0);
+
+   for (int i = 0; i < NTHREADS; i++){  
+      if (pthread_join(thread[i], NULL) != 0) {
+         perror("Falha ao juntar a thread");
+      }
+   }
+}
+
+// Representa o processo de rank 1
+void process1(){
+   pthread_t thread[NTHREADS];
+   pthread_create(&thread[0], NULL, &MainThread, (void*) 1);
+   pthread_create(&thread[1], NULL, &SendThread, (void*) 1);
+   pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 1);
+   
+   for (int i = 0; i < NTHREADS; i++){  
+      if (pthread_join(thread[i], NULL) != 0) {
+         perror("Falha ao juntar a thread");
+      }
+   }
+}
+
+// Representa o processo de rank 2
+void process2(){
+   pthread_t thread[NTHREADS];
+   pthread_create(&thread[0], NULL, &MainThread, (void*) 2);
+   pthread_create(&thread[1], NULL, &SendThread, (void*) 2);
+   pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 2);
+   
+   for (int i = 0; i < NTHREADS; i++){  
+      if (pthread_join(thread[i], NULL) != 0) {
+         perror("Falha ao juntar a thread");
+      }
+   }
+}
+
+int main(int argc, char* argv[]) {
+   int my_rank;
+   
+   pthread_mutex_init(&entradaMUTEX, NULL);
+   pthread_mutex_init(&saidaMUTEX, NULL);
+   pthread_cond_init(&entradaVAZIA, NULL);
+   pthread_cond_init(&saidaVAZIA, NULL);
+   pthread_cond_init(&entradaCHEIO, NULL);
+   pthread_cond_init(&saidaCHEIO, NULL);
+  
+   
+   MPI_Init(NULL, NULL); 
+   MPI_Comm_rank(MPI_COMM_WORLD, &my_rank); 
+
+   if (my_rank == 0) { 
+      process0();
+   } else if (my_rank == 1) {  
+      process1();
+   } else if (my_rank == 2) {  
+      process2();
+   }
+
+   /* Finaliza MPI */
+   
+   
+   pthread_mutex_destroy(&entradaMUTEX);
+   pthread_mutex_destroy(&saidaMUTEX);
+   pthread_cond_destroy(&entradaVAZIA);
+   pthread_cond_destroy(&saidaVAZIA);
+   pthread_cond_destroy(&entradaCHEIO);
+   pthread_cond_destroy(&saidaCHEIO);
+   
+   MPI_Finalize();
+
+   return 0;
+} 
